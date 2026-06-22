@@ -4,6 +4,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { GoogleGenerativeAI } = require("@google/generative-ai"); // 👈 Added Google SDK
 
 const app = express();
 app.use(cors());
@@ -301,6 +302,153 @@ app.delete('/api/projects/:projectId/bugs/:bugId', authenticateToken, (req, res,
     res.status(500).json({ message: 'Failed to delete bug', error: err.message });
   }
 });
+
+// ==========================================
+// 🤖 GEMINI CHAT ENDPOINT WITH DB TOOLS
+// ==========================================
+
+// 1. Initialize Google Generative AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// 2. Define Tools (Functions the AI can call)
+const dbTools = [
+  {
+    functionDeclarations: [
+      {
+        name: "get_projects",
+        description: "Retrieves the list of projects for the current authenticated user.",
+      },
+      {
+        name: "create_project",
+        description: "Creates a new project in the database.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            name: { type: "STRING", description: "The name of the project" },
+            description: { type: "STRING", description: "The description of the project" }
+          },
+          required: ["name"]
+        }
+      },
+      {
+        name: "update_project",
+        description: "Updates an existing project's name or description.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            projectId: { type: "STRING", description: "The ID of the project to update" },
+            name: { type: "STRING", description: "The new name of the project" },
+            description: { type: "STRING", description: "The new description of the project" }
+          },
+          required: ["projectId"]
+        }
+      }
+    ]
+  }
+];
+
+// 3. Setup the Model with Tools
+const chatModel = genAI.getGenerativeModel({ 
+  model: "gemini-2.5-flash", 
+  tools: dbTools 
+});
+
+// 4. The Chat Endpoint
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  try {
+    const { message, history = [] } = req.body;
+    if (!message) return res.status(400).json({ message: "Message is required" });
+
+    // Initialize chat session with previous history (if any)
+    const chat = chatModel.startChat({
+      history: history.map(msg => ({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }]
+      })),
+    });
+
+    // Send the initial user message
+    let result = await chat.sendMessage(message);
+    let response = result.response;
+
+    // 🔄 Loop to handle function calls until the model generates a final text response
+    let iterations = 0;
+    const maxIterations = 5; // Prevent infinite loops
+
+    while (response.candidates && response.candidates[0].content.parts.some(p => p.functionCall) && iterations < maxIterations) {
+      iterations++;
+      
+      const functionCalls = response.candidates[0].content.parts.filter(p => p.functionCall);
+      const functionResponses = [];
+
+      // Execute the requested DB operations
+      for (const call of functionCalls) {
+        const { name, args } = call.functionCall;
+        let output;
+
+        try {
+          if (name === 'get_projects') {
+            const projects = await Project.find({ "members.user": req.user.id }).select('_id name description createdAt');
+            output = { projects };
+            
+          } else if (name === 'create_project') {
+            const project = new Project({
+              name: args.name,
+              description: args.description,
+              createdBy: req.user.id,
+              members: [{ user: req.user.id, role: "admin" }]
+            });
+            await project.save();
+            output = { success: true, projectId: project._id, message: "Project created successfully" };
+            
+          } else if (name === 'update_project') {
+            const updateData = {};
+            if (args.name) updateData.name = args.name;
+            if (args.description) updateData.description = args.description;
+            
+            const project = await Project.findOneAndUpdate(
+              { _id: args.projectId, "members.user": req.user.id }, // Ensures user has access
+              updateData,
+              { new: true }
+            );
+            output = project 
+              ? { success: true, message: "Project updated successfully", project } 
+              : { success: false, message: "Project not found or access denied" };
+              
+          } else {
+            output = { error: "Unknown function called" };
+          }
+        } catch (dbErr) {
+          output = { error: "Database operation failed", details: dbErr.message };
+        }
+
+        // Format the response back to the expected SDK structure
+        functionResponses.push({
+          functionResponse: {
+            name,
+            response: output
+          }
+        });
+      }
+
+      // Send the function results back to the model so it can formulate a text reply
+      result = await chat.sendMessage(functionResponses);
+      response = result.response;
+    }
+
+    // Extract the final text response safely
+    const textPart = response.candidates?.[0]?.content?.parts.find(p => p.text);
+    const finalText = textPart ? textPart.text : "I have processed your request.";
+    
+    res.json({ reply: finalText });
+
+  } catch (err) {
+    console.error("Chat error:", err);
+    res.status(500).json({ message: "Chat failed", error: err.message });
+  }
+});
+
+// ==========================================
 
 app.get('/status', (req, res) => res.json({ status: 'running' }));
 

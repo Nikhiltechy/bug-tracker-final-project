@@ -41,3 +41,28 @@ export const getStoredUser = () => {
   const u = localStorage.getItem('user');
   return u ? JSON.parse(u) : null;
 };
+
+// src/services/api.jsx
+
+// ... your existing code ...
+
+export const chatWithAI = async (message, history = []) => {
+ 
+  const token = localStorage.getItem('token');  
+  
+  const response = await fetch('http://localhost:5000/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({ message, history })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(errorData.message || 'Failed to chat with AI');
+  }
+
+  return response.json();
+};

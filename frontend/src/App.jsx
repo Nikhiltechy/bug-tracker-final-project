@@ -6,6 +6,8 @@ import AuthPage from './pages/AuthPage';
 import Dashboard from './pages/Dashboard';
 import ProjectDetail from './pages/ProjectDetail'; 
 import ProjectBugs from './pages/ProjectBugs';
+import Chat from './pages/Chat'; // 👈 Import the new Chat page
+
 // 🔐 Protected route wrapper
 const Protected = ({ children }) => {
   const { user, loading } = useAuthStore();
@@ -27,6 +29,8 @@ export default function App() {
         <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
         <Route path="/projects/:id" element={<Protected><ProjectDetail /></Protected>} />
         <Route path="/projects/:id/bugs" element={<Protected><ProjectBugs /></Protected>} />
+        <Route path="/chat" element={<Protected><Chat /></Protected>} /> 
+
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
